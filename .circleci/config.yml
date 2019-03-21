@@ -1,0 +1,97 @@
+version: 2.1
+# reusable 'executor' object for jobs
+executors:
+  go:
+    docker:
+      - image: circleci/golang:1.11.5
+    environment:
+      - TEST_RESULTS: /tmp/test-results # path to where test results are saved
+
+jobs:
+  go-fmt-and-vet:
+    executor: go
+    steps:
+      - checkout
+
+      # Restore go module cache if there is one
+      - restore_cache:
+          keys:
+            - consul-k8s-modcache-v1-{{ checksum "go.mod" }}
+
+      - run: go mod download
+
+      # Save go module cache if the go.mod file has changed
+      - save_cache:
+          key: consul-k8s-modcache-v1-{{ checksum "go.mod" }}
+          paths:
+            - "/go/pkg/mod"
+
+      # check go fmt output because it does not report non-zero when there are fmt changes
+      - run:
+          name: check go fmt
+          command: |
+            files=$(go fmt ./...)
+            if [ -n "$files" ]; then
+              echo "The following file(s) do not conform to go fmt:"
+              echo "$files"
+              exit 1
+            fi
+      - run: go vet ./...
+
+  test:
+    executor: go
+    environment:
+      TEST_RESULTS: /tmp/test-results
+      GOTESTSUM_RELEASE: 0.3.4
+    parallelism: 1
+    steps:
+      - checkout
+      - run: mkdir -p $TEST_RESULTS
+
+      # Restore go module cache if there is one
+      - restore_cache:
+          keys:
+            - consul-k8s-modcache-v1-{{ checksum "go.mod" }}
+
+      # update gotestsum
+      - run: curl -sSL "https://github.com/gotestyourself/gotestsum/releases/download/v${GOTESTSUM_RELEASE}/gotestsum_${GOTESTSUM_RELEASE}_linux_amd64.tar.gz" | tar --overwrite -xz -C /usr/local/bin gotestsum
+
+      # run go tests with gotestsum
+      - run: |
+          gotestsum --junitfile $TEST_RESULTS/gotestsum-report.xml -- $(go list ./...)
+
+      - store_test_results:
+          path: /tmp/test-results
+      - store_artifacts:
+          path: /tmp/test-results
+
+  build-distros:
+    executor: go
+    environment:
+      GOXPARALLEL: 2 # CircleCI containers are 2 CPU x 4GB RAM
+    steps:
+      - checkout
+
+      # Restore go module cache if there is one
+      - restore_cache:
+          keys:
+            - consul-k8s-modcache-v1-{{ checksum "go.mod" }}
+
+      - run: make tools
+      - run: ./build-support/scripts/build-local.sh
+
+      # save dev build to CircleCI
+      - store_artifacts:
+          path: ./pkg/bin
+
+workflows:
+  version: 2
+  test-and-build:
+    jobs:
+      - go-fmt-and-vet
+      - test:
+          requires:
+            - go-fmt-and-vet
+      - build-distros:
+          requires:
+            - test
