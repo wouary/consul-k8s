@@ -42,7 +42,6 @@ jobs:
     executor: go
     environment:
       TEST_RESULTS: /tmp/test-results
-      GOTESTSUM_RELEASE: 0.3.4
     parallelism: 1
     steps:
       - checkout
@@ -53,12 +52,10 @@ jobs:
           keys:
             - consul-k8s-modcache-v1-{{ checksum "go.mod" }}
 
-      # update gotestsum
-      - run: curl -sSL "https://github.com/gotestyourself/gotestsum/releases/download/v${GOTESTSUM_RELEASE}/gotestsum_${GOTESTSUM_RELEASE}_linux_amd64.tar.gz" | tar --overwrite -xz -C /usr/local/bin gotestsum
-
       # run go tests with gotestsum
       - run: |
-          gotestsum --junitfile $TEST_RESULTS/gotestsum-report.xml -- $(go list ./...)
+          PACKAGE_NAMES=$(go list ./...)
+          gotestsum --junitfile $TEST_RESULTS/gotestsum-report.xml -- $PACKAGE_NAMES
 
       - store_test_results:
           path: /tmp/test-results
