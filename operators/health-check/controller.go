@@ -30,7 +30,7 @@ type Controller struct {
 	MaxRetries int
 }
 
-func (c *Controller) setupInformer() error {
+func (c *Controller) setupInformer() {
 	c.Informer = cache.NewSharedIndexInformer(
 		// the ListWatch contains two different functions that our
 		// informer requires: ListFunc to take care of listing and watching
@@ -52,7 +52,6 @@ func (c *Controller) setupInformer() error {
 		0,             // no resync (period of 0)
 		cache.Indexers{},
 	)
-	return nil
 }
 
 func (c *Controller) setupWorkQueue() {
@@ -214,10 +213,10 @@ func (c *Controller) processNextItem() bool {
 	if err != nil {
 		// TODO: fix this retry number
 		if c.Queue.NumRequeues(key) < 5 {
-			c.Log.Error("Controller.processNextItem: Failed processing item with key %s with error %v, retrying", key, err)
+			c.Log.Error("controller.processNextItem: Failed processing item with key %s with error %v, retrying", key, err)
 			c.Queue.AddRateLimited(key)
 		} else {
-			c.Log.Error("Controller.processNextItem: Failed processing item with key %s with error %v, no more retries", key, err)
+			c.Log.Error("controller.processNextItem: Failed processing item with key %s with error %v, no more retries", key, err)
 			c.Queue.Forget(key)
 			utilruntime.HandleError(err)
 		}
@@ -230,22 +229,22 @@ func (c *Controller) processNextItem() bool {
 	// after both instances, we want to forget the key from the Queue, as this indicates
 	// a code path of successful Queue key processing
 	if !exists {
-		c.Log.Info("Controller.processNextItem: object deleted detected: %s", keyRaw)
+		c.Log.Info("controller.processNextItem: object deleted detected: %s", keyRaw)
 		err = c.Handle.ObjectDeleted(item)
 		if err == nil {
 			c.Queue.Forget(key)
 		} else if c.Queue.NumRequeues(key) < c.MaxRetries {
-			c.Log.Error("Unable to process request, retrying")
+			c.Log.Error("unable to process request, retrying")
 			c.Queue.AddRateLimited(key)
 		}
 	} else {
 		// This is a Pod Status Update
-		c.Log.Info("Controller.processNextItem: object update detected: %s", keyRaw)
+		c.Log.Info("controller.processNextItem: object update detected: %s", keyRaw)
 		err = c.Handle.ObjectUpdated(nil, item)
 		if err == nil {
 			c.Queue.Forget(key)
 		} else if c.Queue.NumRequeues(key) < c.MaxRetries {
-			c.Log.Error("Unable to process request, retrying")
+			c.Log.Error("unable to process request, retrying")
 			c.Queue.AddRateLimited(key)
 		}
 	}
