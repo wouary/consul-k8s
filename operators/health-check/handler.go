@@ -5,6 +5,7 @@ package healthcheckoperator
 import (
 	"flag"
 	"fmt"
+	"github.com/cenkalti/backoff"
 	"github.com/hashicorp/consul-k8s/subcommand/flags"
 	"github.com/hashicorp/consul/api"
 	log "github.com/hashicorp/go-hclog"
@@ -45,31 +46,38 @@ func (t *HealthCheckHandler) getConsulServiceID(pod *core_v1.Pod) string {
 // The Agent is local to the Pod which has failed a health check.
 // This has the effect of marking the endpoint unhealthy for Consul mesh traffic.
 func (t *HealthCheckHandler) registerConsulHealthCheck(consulHealthCheckID, serviceID string) error {
-
 	t.Log.Info("registerHealthCheck, %v %v", consulHealthCheckID, serviceID)
-	time.Sleep(15 * time.Second)
-	svc, er := t.Client.Agent().Services()
-	if er != nil {
-		t.Log.Error("-------- err getting Services: %v", er)
-		return er
-	}
-	for _, y := range svc {
-		if y.Service == serviceID {
-			t.Log.Error("We've found the correct service: %v", serviceID)
-			break
+	// There is a chance of a race between when the Pod is transitioned to healthy by k8s and when we've initially
+	// completed the registration of the service with the Consul Agent on this node. Retry a few times to be sure
+	// that the service does in fact exist, otherwise it will return 500 from Consul API.
+	retries := 0
+	var err error
+	err = backoff.Retry(func() error {
+		if retries > 10 {
+			err = fmt.Errorf("did not find serviceID: %v", serviceID)
+			return nil
 		}
-		//t.Log.Info("===== svc: %v", y.ID, y.Service, y.Address)
+		retries++
+		svc, err := t.Client.Agent().Services()
+		if err == nil {
+			for _, y := range svc {
+				if y.Service == serviceID {
+					return nil
+				}
+			}
+			return fmt.Errorf("did not find serviceID: %v", serviceID)
+		}
+		return err
+	}, backoff.NewConstantBackOff(1*time.Second))
+	if err != nil {
+		return err
 	}
-
-	err := t.Client.Agent().CheckRegister(&api.AgentCheckRegistration{
-		//		ID:        consulHealthCheckID,
+	err = t.Client.Agent().CheckRegister(&api.AgentCheckRegistration{
 		Name:      consulHealthCheckID,
 		Notes:     "Failing TTL health check for pod status update",
 		ServiceID: serviceID,
 		AgentServiceCheck: api.AgentServiceCheck{
-			// TODO: CheckID+Name needs a name for us to look stuff up with
-			CheckID:                        "", // Unknown checkID
-			Name:                           "TestCheck",
+			//Name:                           "TestCheck",
 			TTL:                            "100h",
 			Status:                         "critical",
 			Notes:                          "",
@@ -108,13 +116,17 @@ func (t *HealthCheckHandler) updateConsulClient(pod *core_v1.Pod) error {
 	var err error
 	// TODO: This is pretty hacky
 	// TODO: submit PR for HTTPFlags.SetAddress API
-	t.Log.Info("Setting consul client to: %v", pod.Status.HostIP)
-	newAddr := fmt.Sprintf("%v:%v", hostIP, "8500")
 	// TODO:  figure out how to pass agent-port :  t.Flags.Lookup("agent-port").Name)
-	err = t.HFlags.SetAddress(newAddr)
+	port := "8500"
+	if pod.Annotations["consul.hashicorp.com/connect-service-port"] == "https" {
+		port = "8501"
+	}
+	newAddr := fmt.Sprintf("%v:%v", hostIP, port)
+	t.Log.Info("Setting consul client to: %v", newAddr)
+	t.HFlags.SetAddress(newAddr)
 	t.Client, err = t.HFlags.APIClient()
 	if err != nil {
-		t.Log.Error("creating Consul client for address %s: %s", hostIP, err)
+		t.Log.Error("creating Consul client for address %s: %s", newAddr, err)
 	}
 	return err
 }

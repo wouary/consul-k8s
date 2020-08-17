@@ -71,23 +71,24 @@ func (c *Controller) addEventHandlers() {
 		AddFunc: func(obj interface{}) {
 			// convert the resource object into a key (in this case
 			// we are just doing it in the format of 'namespace/name')
-			key, err := cache.MetaNamespaceKeyFunc(obj)
-			c.Log.Info("Add pod: %s", key)
-			if err == nil {
-				// TODO: do not queue a queue for Create because it is a no-op anyway
-				// add the key to the queue for the handler to get
-				c.Queue.Add(key)
-			}
+			/*			key, err := cache.MetaNamespaceKeyFunc(obj)
+						c.Log.Info("Add pod: %s", key)
+						if err == nil {
+							// TODO: do not queue a queue for Create because it is a no-op anyway
+							c.Queue.Add(key)
+						}
+			*/
 		},
 		UpdateFunc: func(oldObj, newObj interface{}) {
-			// TODO: Right now we're catching the pod update but we're unable to see that its an update via the Key
 			newPod := newObj.(*corev1.Pod)
 			oldPod := oldObj.(*corev1.Pod)
 
+			// TODO
 			if reflect.DeepEqual(oldObj, newObj) == false {
-				c.Log.Info("======== Deployment Updated: " + newPod.Name)
+				c.Log.Debug("pod was updated : " + newPod.Name)
 			} else {
-				c.Log.Info("========= not updated" + newPod.Name)
+				c.Log.Debug("pod was not updated " + newPod.Name)
+				return
 			}
 			// Logic is as follows:
 			// We will only queue events which satisfy the condition of a pod Status Condition change from Ready/NotReady
@@ -150,7 +151,7 @@ func (c *Controller) Run(stopCh <-chan struct{}) {
 
 	// do the initial synchronization (one time) to populate resources
 	if !cache.WaitForCacheSync(stopCh, c.HasSynced) {
-		utilruntime.HandleError(fmt.Errorf("Error syncing cache"))
+		utilruntime.HandleError(fmt.Errorf("error syncing cache"))
 		return
 	}
 	c.Log.Info("Controller.Run: cache sync complete")
