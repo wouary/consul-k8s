@@ -7,6 +7,7 @@ import (
 	cmdCreateFederationSecret "github.com/hashicorp/consul-k8s/subcommand/create-federation-secret"
 	cmdDeleteCompletedJob "github.com/hashicorp/consul-k8s/subcommand/delete-completed-job"
 	cmdGetConsulClientCA "github.com/hashicorp/consul-k8s/subcommand/get-consul-client-ca"
+	cmdHealthCheckOperator "github.com/hashicorp/consul-k8s/subcommand/health-check-operator"
 	cmdInjectConnect "github.com/hashicorp/consul-k8s/subcommand/inject-connect"
 	cmdLifecycleSidecar "github.com/hashicorp/consul-k8s/subcommand/lifecycle-sidecar"
 	cmdServerACLInit "github.com/hashicorp/consul-k8s/subcommand/server-acl-init"
@@ -62,6 +63,9 @@ func init() {
 
 		"create-federation-secret": func() (cli.Command, error) {
 			return &cmdCreateFederationSecret.Command{UI: ui}, nil
+		},
+		"health-checks": func() (cli.Command, error) {
+			return &cmdHealthCheckOperator.Command{UI: ui}, nil
 		},
 	}
 }
