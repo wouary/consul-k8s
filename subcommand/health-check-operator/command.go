@@ -102,7 +102,7 @@ func (c *Command) init() {
 func (c *Command) Run(args []string) int {
 	c.once.Do(c.init)
 	if err := c.flags.Parse(args); err != nil {
-		c.UI.Info(fmt.Sprintf("============= %v", err))
+		c.UI.Info(fmt.Sprintf("%v", err))
 		return 1
 	}
 	if len(c.flags.Args()) > 0 {

@@ -106,6 +106,14 @@ func (c *Controller) addEventHandlers() {
 			// If the Pod Status has changed, we queue the NewObj and we will know based on the condition status
 			// whether or not this is an update TO or FROM healthy in the event handler
 			if oldPodStatus != newPodStatus {
+				// But only in the case of transition from unhealthy to healthy
+				// TODO: investigate whether or not the Pod starts up unhealthy and migrates healthy
+				// and be sure that the initial healthy doesnt try to delete a health check that doesnt exist
+				/*
+					if newPodStatus == corev1.ConditionTrue && oldPodStatus != corev1.ConditionTrue	{
+						// unhealthy and then
+					}
+				*/
 				key, err := cache.MetaNamespaceKeyFunc(newObj)
 				c.Log.Debug("Update pod: %s", key)
 				if err == nil {
@@ -211,9 +219,8 @@ func (c *Controller) processNextItem() bool {
 	// and throw an error
 	item, exists, err := c.Informer.GetIndexer().GetByKey(keyRaw)
 	if err != nil {
-		// TODO: fix this retry number
-		if c.Queue.NumRequeues(key) < 5 {
-			c.Log.Error("controller.processNextItem: Failed processing item with key %s with error %v, retrying", key, err)
+		if c.Queue.NumRequeues(key) < c.MaxRetries {
+			c.Log.Info("controller.processNextItem: Failed processing item with key %s with error %v, retrying", key, err)
 			c.Queue.AddRateLimited(key)
 		} else {
 			c.Log.Error("controller.processNextItem: Failed processing item with key %s with error %v, no more retries", key, err)
@@ -224,7 +231,7 @@ func (c *Controller) processNextItem() bool {
 
 	// if the item doesn't exist then it was deleted and we need to fire off the Handle's
 	// ObjectDeleted method. but if the object does exist that indicates that the object
-	// was created (or updated) so run the ObjectCreated method
+	// was created (or updated) so run the ObjectUpdated method
 	//
 	// after both instances, we want to forget the key from the Queue, as this indicates
 	// a code path of successful Queue key processing
