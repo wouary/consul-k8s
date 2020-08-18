@@ -25,7 +25,7 @@ import (
 )
 
 const (
-	numRetries = 5
+	numRetries = 10
 )
 
 // Command is the command for syncing the K8S and Consul service
@@ -105,7 +105,6 @@ func (c *Command) Run(args []string) int {
 	c.once.Do(c.init)
 	if err := c.flags.Parse(args); err != nil {
 		c.UI.Info(fmt.Sprintf("============= %v", err))
-		c.logger.Info("========== err: %v", err)
 		return 1
 	}
 	if len(c.flags.Args()) > 0 {
@@ -120,7 +119,6 @@ func (c *Command) Run(args []string) int {
 			c.UI.Error(fmt.Sprintf("Error retrieving Kubernetes auth: %s", err))
 			return 1
 		}
-
 		c.clientset, err = kubernetes.NewForConfig(config)
 		if err != nil {
 			c.UI.Error(fmt.Sprintf("Error initializing Kubernetes client: %s", err))
@@ -164,7 +162,7 @@ func (c *Command) Run(args []string) int {
 	ctx, cancelF := context.WithCancel(context.Background())
 
 	// Start Consul-to-K8S sync
-	var toK8SCh chan struct{}
+	var healthCh chan struct{}
 	// construct the Controller object which has all of the necessary components to
 	// handle logging, connections, informing (listing and watching), the queue,
 	// and the handler
@@ -185,7 +183,9 @@ func (c *Command) Run(args []string) int {
 		Handle:     healthCheckHandler,
 		MaxRetries: numRetries,
 	}
-	// Start healthcheck handler
+
+	// Start healthcheck health handler
+	// TODO: currently a no-op because consulClient is not initiated yet
 	go func() {
 		mux := http.NewServeMux()
 		mux.HandleFunc("/health/ready", c.handleReady)
@@ -197,23 +197,24 @@ func (c *Command) Run(args []string) int {
 		}
 	}()
 
-	toK8SCh = make(chan struct{})
+	// Start the HealthCheck controller
+	healthCh = make(chan struct{})
 	go func() {
-		defer close(toK8SCh)
+		defer close(healthCh)
 		cont.Run(ctx.Done())
 	}()
 
 	select {
 	// Unexpected exit
-	case <-toK8SCh:
+	case <-healthCh:
 		cancelF()
 		return 1
 
 	// Interrupted, gracefully exit
 	case <-c.sigCh:
 		cancelF()
-		if toK8SCh != nil {
-			<-toK8SCh
+		if healthCh != nil {
+			<-healthCh
 		}
 		return 0
 	}
@@ -232,14 +233,15 @@ func (c *Command) interrupt() {
 }
 
 // TODO: fix
-const synopsis = "Sync Kubernetes services and Consul services."
+const synopsis = "Sync Kubernetes Health Check transitions with Consul services."
 const help = `
-Usage: consul-k8s sync-catalog [options]
+Usage: consul-k8s health-checks [options]
 
-  Sync K8S pods, services, and more with the Consul service catalog.
-  This enables K8S services to discover and communicate with external
-  services, and allows external services to discover and communicate with
-  K8S services.
+  Syncs Kubernetes Health Check Pod transitions with Consul.
+  When a k8s probe fails and the Pod is marked Unhealthy the
+  transition will be sent down to Consul in form of a Consul
+  TTL health check which allows Consul to direct traffic
+  accordingly.
 
 `
 

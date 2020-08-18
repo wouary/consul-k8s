@@ -107,7 +107,7 @@ func (c *Controller) addEventHandlers() {
 			// whether or not this is an update TO or FROM healthy in the event handler
 			if oldPodStatus != newPodStatus {
 				key, err := cache.MetaNamespaceKeyFunc(newObj)
-				c.Log.Info("Update pod: %s", key)
+				c.Log.Debug("Update pod: %s", key)
 				if err == nil {
 					c.Queue.Add(key)
 				}
@@ -120,7 +120,7 @@ func (c *Controller) addEventHandlers() {
 			//
 			// this then in turn calls MetaNamespaceKeyFunc
 			key, err := cache.DeletionHandlingMetaNamespaceKeyFunc(obj)
-			c.Log.Info("Delete pod: %s", key)
+			c.Log.Debug("Delete pod: %s", key)
 			if err == nil {
 				c.Queue.Add(key)
 			}
@@ -143,7 +143,7 @@ func (c *Controller) Run(stopCh <-chan struct{}) {
 	// have completed existing items then shutdown
 	defer c.Queue.ShutDown()
 
-	c.Log.Info("Controller.Run: initiating")
+	c.Log.Debug("Controller.Run: initiating")
 
 	// run the Informer to start listing and watching resources
 	go c.Informer.Run(stopCh)
@@ -153,7 +153,7 @@ func (c *Controller) Run(stopCh <-chan struct{}) {
 		utilruntime.HandleError(fmt.Errorf("error syncing cache"))
 		return
 	}
-	c.Log.Info("Controller.Run: cache sync complete")
+	c.Log.Debug("Controller.Run: cache sync complete")
 
 	// run the runWorker method every second with a stop channel
 	wait.Until(c.runWorker, time.Second, stopCh)
@@ -167,22 +167,22 @@ func (c *Controller) HasSynced() bool {
 
 // runWorker executes the loop to process new items added to the Queue
 func (c *Controller) runWorker() {
-	c.Log.Info("Controller.runWorker: starting")
+	c.Log.Debug("Controller.runWorker: starting")
 
 	// invoke processNextItem to fetch and consume the next change
 	// to a watched or listed resource
 	for c.processNextItem() {
-		c.Log.Info("Controller.runWorker: processing next item")
+		c.Log.Debug("Controller.runWorker: processing next item")
 	}
 
-	c.Log.Info("Controller.runWorker: completed")
+	c.Log.Debug("Controller.runWorker: completed")
 }
 
 // processNextItem retrieves each Queued item and takes the
 // necessary Handle action based off of if the item was
 // created or deleted
 func (c *Controller) processNextItem() bool {
-	c.Log.Info("Controller.processNextItem: start")
+	c.Log.Debug("Controller.processNextItem: start")
 
 	// fetch the next item (blocking) from the Queue to process or
 	// if a shutdown is requested then return out of this to stop

@@ -70,14 +70,15 @@ func (t *HealthCheckHandler) registerConsulHealthCheck(consulHealthCheckID, serv
 		return err
 	}, backoff.NewConstantBackOff(1*time.Second))
 	if err != nil {
+		// We were unable to find the service on this host
 		return err
 	}
+	// Now create a failing TTL health check in Consul associated with this service.
 	err = t.Client.Agent().CheckRegister(&api.AgentCheckRegistration{
 		Name:      consulHealthCheckID,
 		Notes:     "Failing TTL health check for pod status update",
 		ServiceID: serviceID,
 		AgentServiceCheck: api.AgentServiceCheck{
-			//Name:                           "TestCheck",
 			TTL:                            "100h",
 			Status:                         "critical",
 			Notes:                          "",
@@ -131,40 +132,45 @@ func (t *HealthCheckHandler) updateConsulClient(pod *core_v1.Pod) error {
 	return err
 }
 
-// Init handles any handler initialization
+// Init handles any handler initialization and is a no-op
 func (t *HealthCheckHandler) Init() error {
 	return nil
 }
 
-// ObjectCreated is called when an object is created
+// ObjectCreated is called when an object is created and is a no-op
 func (t *HealthCheckHandler) ObjectCreated(obj interface{}) error {
 	return nil
 }
 
-// ObjectDeleted is called when an object is deleted
-//
+// ObjectDeleted is called when an object is deleted, in theory there exists a race
+// condition where the Pod deletes by the service is being deregistered, so we will
+// skip errors.
 func (t *HealthCheckHandler) ObjectDeleted(obj interface{}) error {
 	pod := obj.(*core_v1.Pod)
 	consulHealthCheckID := t.getConsulHealthCheckID(pod)
 	err := t.updateConsulClient(pod)
 	if err != nil {
-		t.Log.Error("%v", err)
-		// TODO: do something
+		t.Log.Error("unable to update Consul client: %v", err)
+		return err
 	}
 	err = t.deregisterConsulHealthCheck(consulHealthCheckID)
 	if err != nil {
-		// TODO: how to handle errors here?
-		t.Log.Error("%v", err)
+		// TODO: how to handle errors here, for now we're skipping them!
+		t.Log.Error("unable to deregister health check: %v", err)
 	}
-	// TODO: Delete the healthcheck if it exists
-	t.Log.Info("HealthCheckHandler.ObjectDeleted %v", pod.Status.HostIP, consulHealthCheckID)
+	t.Log.Debug("HealthCheckHandler.ObjectDeleted %v", pod.Status.HostIP, consulHealthCheckID)
 	return nil
 }
 
 // ObjectUpdated is called when an object is updated
+// This occurs anytime there is a specific transition from Pod healthy/unhealthy
+// to unhealthy/healthy and is driven off a queue managed by the controller.
+// Since we've guaranteed this is a transition we only care about the "to" state which is the objNew PodCondition.
+// As such objOld will always be nil.
+//TODO: fix the interface so we dont need to pass objOld
 func (t *HealthCheckHandler) ObjectUpdated(objOld, objNew interface{}) error {
 	pod := objNew.(*core_v1.Pod)
-	t.Log.Info("HealthCheckHandler.ObjectUpdated, %v %v", pod.Status.HostIP, pod.Status.Conditions)
+	t.Log.Debug("HealthCheckHandler.ObjectUpdated, %v %v", pod.Status.HostIP, pod.Status.Conditions)
 	var err error
 
 	// Health checks for Consul are agent-local and as such we need a client connection
@@ -176,9 +182,8 @@ func (t *HealthCheckHandler) ObjectUpdated(objOld, objNew interface{}) error {
 	// TODO: alternative methods, this will need to change for agentless
 	err = t.updateConsulClient(pod)
 	if err != nil {
-		t.Log.Error("%v", err)
+		t.Log.Error("unable to update Consul client: %v", err)
 		return err
-		// TODO: do something
 	}
 	// The consulHealthCheckID is the health check ID registered with the Consul agent
 	// this is an agent-unique ID to identify the TTL health check we create so we can remove
@@ -198,8 +203,7 @@ func (t *HealthCheckHandler) ObjectUpdated(objOld, objNew interface{}) error {
 			// via failed k8s health-check probes.
 			err = t.registerConsulHealthCheck(consulHealthCheckID, t.getConsulServiceID(pod))
 			if err != nil {
-				// TODO: do something?
-				t.Log.Error("%v", err)
+				t.Log.Error("unable to register health check: %v", err)
 				return err
 			}
 			break
@@ -222,6 +226,6 @@ func (t *HealthCheckHandler) ObjectUpdated(objOld, objNew interface{}) error {
 	}
 	// TODO: how to drop the client connection cleanly?
 	t.Client = nil
-	t.Log.Info("HealthCheckHandler.ObjectUpdated, %v %v", pod.Status.HostIP, pod.Status.Conditions)
+	t.Log.Debug("HealthCheckHandler.ObjectUpdated, %v %v", pod.Status.HostIP, pod.Status.Conditions)
 	return nil
 }
