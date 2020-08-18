@@ -5,12 +5,13 @@ package healthcheckoperator
 import (
 	"flag"
 	"fmt"
+	"time"
+
 	"github.com/cenkalti/backoff"
 	"github.com/hashicorp/consul-k8s/subcommand/flags"
 	"github.com/hashicorp/consul/api"
 	log "github.com/hashicorp/go-hclog"
-	core_v1 "k8s.io/api/core/v1"
-	"time"
+	corev1 "k8s.io/api/core/v1"
 )
 
 // Handler interface contains the methods that are required
@@ -33,12 +34,12 @@ type HealthCheckHandler struct {
 
 // getConsulHealthCheckID deterministically generates a health check ID that will be unique to the Agent
 // where the health check is registered and deregistered.
-func (t *HealthCheckHandler) getConsulHealthCheckID(pod *core_v1.Pod) string {
+func (t *HealthCheckHandler) getConsulHealthCheckID(pod *corev1.Pod) string {
 	return t.getConsulServiceID(pod) + "-health-check-failing-ttl"
 }
 
 // return the serviceID of the connect service
-func (t *HealthCheckHandler) getConsulServiceID(pod *core_v1.Pod) string {
+func (t *HealthCheckHandler) getConsulServiceID(pod *corev1.Pod) string {
 	return pod.Name + "-" + pod.Annotations["consul.hashicorp.com/connect-service"]
 }
 
@@ -112,7 +113,7 @@ func (t *HealthCheckHandler) deregisterConsulHealthCheck(consulHealthCheckID str
 
 // updateConsulClient creates a new connection to Consul pointed at the hostIP
 // of the Pod in order to make Agent calls for health check registration/deregistration.
-func (t *HealthCheckHandler) updateConsulClient(pod *core_v1.Pod) error {
+func (t *HealthCheckHandler) updateConsulClient(pod *corev1.Pod) error {
 	hostIP := pod.Status.HostIP
 	var err error
 	// TODO: This is pretty hacky
@@ -146,7 +147,7 @@ func (t *HealthCheckHandler) ObjectCreated(obj interface{}) error {
 // condition where the Pod deletes by the service is being deregistered, so we will
 // skip errors.
 func (t *HealthCheckHandler) ObjectDeleted(obj interface{}) error {
-	pod := obj.(*core_v1.Pod)
+	pod := obj.(*corev1.Pod)
 	consulHealthCheckID := t.getConsulHealthCheckID(pod)
 	err := t.updateConsulClient(pod)
 	if err != nil {
@@ -169,7 +170,7 @@ func (t *HealthCheckHandler) ObjectDeleted(obj interface{}) error {
 // As such objOld will always be nil.
 //TODO: fix the interface so we dont need to pass objOld
 func (t *HealthCheckHandler) ObjectUpdated(objOld, objNew interface{}) error {
-	pod := objNew.(*core_v1.Pod)
+	pod := objNew.(*corev1.Pod)
 	t.Log.Debug("HealthCheckHandler.ObjectUpdated, %v %v", pod.Status.HostIP, pod.Status.Conditions)
 	var err error
 
@@ -196,7 +197,7 @@ func (t *HealthCheckHandler) ObjectUpdated(objOld, objNew interface{}) error {
 	// If it is set to 'False' the Pod has failed health checks and is not considered healthy
 	// enough to pass traffic.
 	for _, y := range pod.Status.Conditions {
-		if y.Type == "Ready" && y.Status != core_v1.ConditionTrue {
+		if y.Type == "Ready" && y.Status != corev1.ConditionTrue {
 			// Register a failing TTL health check with Consul for this agent+endpoint.
 			// This will cause the endpoint to be removed from the Consul dns list and
 			// stop sending service traffic to the Pod which has been marked Unready
@@ -208,7 +209,7 @@ func (t *HealthCheckHandler) ObjectUpdated(objOld, objNew interface{}) error {
 			}
 			break
 		} else {
-			if y.Type == "Ready" && y.Status == core_v1.ConditionTrue {
+			if y.Type == "Ready" && y.Status == corev1.ConditionTrue {
 				// de-register the failing TTL
 				// This will remove the failing TTL health check against the Consul endpoint,
 				// assuming that the service's other health checks are passing,

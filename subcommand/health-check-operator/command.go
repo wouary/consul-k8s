@@ -5,9 +5,6 @@ import (
 	"flag"
 	"fmt"
 	"net/http"
-
-	"k8s.io/apimachinery/pkg/runtime"
-
 	"os"
 	"os/signal"
 	"sync"
@@ -20,6 +17,7 @@ import (
 	"github.com/hashicorp/go-hclog"
 	"github.com/mitchellh/cli"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes"
 	_ "k8s.io/client-go/plugin/pkg/client/auth/gcp"
 )
