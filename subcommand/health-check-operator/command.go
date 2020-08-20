@@ -9,7 +9,6 @@ import (
 	"os/signal"
 	"sync"
 
-	mapset "github.com/deckarep/golang-set"
 	hcko "github.com/hashicorp/consul-k8s/operators/health-check"
 	"github.com/hashicorp/consul-k8s/subcommand"
 	"github.com/hashicorp/consul-k8s/subcommand/flags"
@@ -32,23 +31,16 @@ const (
 type Command struct {
 	UI cli.Ui
 
-	flags                     *flag.FlagSet
-	http                      *flags.HTTPFlags
-	k8s                       *flags.K8SFlags
-	flagListen                string
-	flagK8SServicePrefix      string
-	flagK8SSourceNamespace    string
-	flagK8SWriteNamespace     string
-	flagAddK8SNamespaceSuffix bool
-	flagLogLevel              string
-	flagAgentPort             string
+	flags                  *flag.FlagSet
+	http                   *flags.HTTPFlags
+	k8s                    *flags.K8SFlags
+	flagListen             string
+	flagK8SSourceNamespace string
+	flagLogLevel           string
+	flagAgentPort          string
 
 	// Flags to support namespaces
-	flagEnableNamespaces           bool     // Use namespacing on all components
-	flagConsulDestinationNamespace string   // Consul namespace to register everything if not mirroring
-	flagAllowK8sNamespacesList     []string // K8s namespaces to explicitly inject
-	flagDenyK8sNamespacesList      []string // K8s namespaces to deny injection (has precedence)
-	flagCrossNamespaceACLPolicy    string   // The name of the ACL policy to add to every created namespace if ACLs are enabled
+	flagEnableNamespaces bool // Use namespacing on all components
 
 	consulClient *api.Client
 	clientset    kubernetes.Interface
@@ -62,26 +54,13 @@ type Command struct {
 func (c *Command) init() {
 	c.flags = flag.NewFlagSet("", flag.ContinueOnError)
 	c.flags.StringVar(&c.flagListen, "listen", ":8080", "Address to bind listener to.")
-	c.flags.StringVar(&c.flagK8SServicePrefix, "k8s-service-prefix", "",
-		"A prefix to prepend to all services written to Kubernetes from Consul. "+
-			"If this is not set then services will have no prefix.")
+	// TODO: do not think this is needed
 	c.flags.StringVar(&c.flagK8SSourceNamespace, "k8s-source-namespace", metav1.NamespaceAll,
 		"The Kubernetes namespace to watch for service changes and sync to Consul. "+
 			"If this is not set then it will default to all namespaces.")
-	c.flags.StringVar(&c.flagK8SWriteNamespace, "k8s-write-namespace", metav1.NamespaceDefault,
-		"The Kubernetes namespace to write to for services from Consul. "+
-			"If this is not set then it will default to the default namespace.")
-	c.flags.BoolVar(&c.flagAddK8SNamespaceSuffix, "add-k8s-namespace-suffix", false,
-		"If true, Kubernetes namespace will be appended to service names synced to Consul separated by a dash. "+
-			"If false, no suffix will be appended to the service names in Consul. "+
-			"If the service name annotation is provided, the suffix is not appended.")
 	c.flags.StringVar(&c.flagLogLevel, "log-level", "info",
 		"Log verbosity level. Supported values (in order of detail) are \"trace\", "+
 			"\"debug\", \"info\", \"warn\", and \"error\".")
-	c.flags.Var((*flags.AppendSliceValue)(&c.flagAllowK8sNamespacesList), "allow-k8s-namespace",
-		"K8s namespaces to explicitly allow. May be specified multiple times.")
-	c.flags.Var((*flags.AppendSliceValue)(&c.flagDenyK8sNamespacesList), "deny-k8s-namespace",
-		"K8s namespaces to explicitly deny. Takes precedence over allow. May be specified multiple times.")
 	c.flags.StringVar(&c.flagAgentPort, "agent-port", "8500", "The server agent port to use when connecting, 8500/8501")
 
 	c.http = &flags.HTTPFlags{}
@@ -138,25 +117,6 @@ func (c *Command) Run(args []string) int {
 		})
 	}
 
-	// Convert allow/deny lists to sets
-	// TODO: do we need these lists?
-	allowSet := mapset.NewSet()
-	denySet := mapset.NewSet()
-	if c.flagK8SSourceNamespace != "" {
-		// For backwards compatibility, if `flagK8SSourceNamespace` is set,
-		// it will be the only allowed namespace
-		allowSet.Add(c.flagK8SSourceNamespace)
-	} else {
-		for _, allow := range c.flagAllowK8sNamespacesList {
-			allowSet.Add(allow)
-		}
-		for _, deny := range c.flagDenyK8sNamespacesList {
-			denySet.Add(deny)
-		}
-	}
-	c.logger.Info("K8s namespace syncing configuration", "k8s namespaces allowed to be synced", allowSet,
-		"k8s namespaces denied from syncing", denySet)
-
 	// Create the context we'll use to cancel everything
 	ctx, cancelF := context.WithCancel(context.Background())
 
@@ -182,6 +142,7 @@ func (c *Command) Run(args []string) int {
 		Queue:      nil,
 		Handle:     healthCheckHandler,
 		MaxRetries: numRetries,
+		Namespace:  c.flagK8SSourceNamespace,
 	}
 
 	// Start healthcheck health handler

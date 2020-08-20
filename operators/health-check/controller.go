@@ -22,6 +22,7 @@ import (
 // Controller struct defines how a controller should encapsulate
 // logging, client connectivity, informing (list and watching)
 // queueing, and handling of resource changes
+// TODO: right now we only support a single namespace or "metav1.NamespaceAll"
 type Controller struct {
 	Log        log.Logger
 	Clientset  kubernetes.Interface
@@ -29,6 +30,7 @@ type Controller struct {
 	Informer   cache.SharedIndexInformer
 	Handle     Handler
 	MaxRetries int
+	Namespace  string
 }
 
 func (c *Controller) setupInformer() {
@@ -39,14 +41,13 @@ func (c *Controller) setupInformer() {
 		&cache.ListWatch{
 			ListFunc: func(options metav1.ListOptions) (runtime.Object, error) {
 				options.LabelSelector = "consul" //=consul.hashicorp.com/connect-inject"
-				// list all of the pods (core resource) in the default namespace
-				// TODO: Find where we store k8sAllowNamespaces and how to watch only that
-				return c.Clientset.CoreV1().Pods(metav1.NamespaceAll).List(ctx.Background(), options)
+				// list all of the pods (core resource) in the k8s namespace
+				return c.Clientset.CoreV1().Pods(c.Namespace).List(ctx.Background(), options)
 			},
 			WatchFunc: func(options metav1.ListOptions) (watch.Interface, error) {
 				options.LabelSelector = "consul" //=consul.hashicorp.com/connect-inject"
-				// watch all of the pods which match Consul labels in all namespaces
-				return c.Clientset.CoreV1().Pods(metav1.NamespaceAll).Watch(ctx.Background(), options)
+				// watch all of the pods which match Consul labels in k8s namespace
+				return c.Clientset.CoreV1().Pods(c.Namespace).Watch(ctx.Background(), options)
 			},
 		},
 		&corev1.Pod{}, // the target type (Pod)
@@ -59,6 +60,8 @@ func (c *Controller) setupWorkQueue() {
 	// create a new queue so that when the informer gets a resource that is either
 	// a result of listing or watching, we can add an idenfitying key to the queue
 	// so that it can be handled in the handler
+	// The queue will be indexed via keys in the format of :  OPTION/namespace/resource
+	// where OPTION will be one of ADD/UPDATE/CREATE
 	c.Queue = workqueue.NewRateLimitingQueue(workqueue.DefaultControllerRateLimiter())
 }
 
@@ -88,7 +91,8 @@ func (c *Controller) addEventHandlers() {
 				return
 			}
 			// Logic is as follows:
-			// We will only queue events which satisfy the condition of a pod Status Condition change from Ready/NotReady
+			// We will only queue events which satisfy the condition of a pod Status Condition
+			// change from Ready/NotReady
 			oldPodStatus := corev1.ConditionTrue
 			newPodStatus := corev1.ConditionTrue
 			for _, y := range oldPod.Status.Conditions {
@@ -104,9 +108,8 @@ func (c *Controller) addEventHandlers() {
 			// If the Pod Status has changed, we queue the NewObj and we will know based on the condition status
 			// whether or not this is an update TO or FROM healthy in the event handler
 			if oldPodStatus != newPodStatus {
-				// But only in the case of transition from unhealthy to healthy
 				// TODO: investigate whether or not the Pod starts up unhealthy and migrates healthy
-				// and be sure that the initial healthy doesnt try to delete a health check that doesnt exist
+				// TODO: and be sure that the initial healthy doesnt try to delete a health check that doesnt exist
 				key, err := cache.MetaNamespaceKeyFunc(newObj)
 				c.Log.Debug("Update pod: %s", key)
 				if err == nil {
@@ -189,20 +192,17 @@ func (c *Controller) processNextItem() bool {
 	// if a shutdown is requested then return out of this to stop
 	// processing
 	key, quit := c.Queue.Get()
-
-	// stop the worker loop from running as this indicates we
-	// have sent a shutdown message that the Queue has indicated
-	// from the Get method
 	if quit {
 		return false
 	}
 
 	// assert the string out of the key (format `namespace/name`)
-	// Format is as follows :  add/namespace/name, delete/namespace/name
-	add := true
+	// Format is as follows :  create/namespace/name, delete/namespace/name, update/namespace/name
+	// Also keep track if this is an Add
+	create := true
 	formattedKey := strings.Split(key.(string), "/")
 	if formattedKey[0] != "ADD" {
-		add = false
+		create = false
 	}
 	keyRaw := strings.Join(formattedKey[1:], "/")
 
@@ -245,15 +245,14 @@ func (c *Controller) processNextItem() bool {
 			c.Queue.AddRateLimited(key)
 		}
 	} else {
-		if add == true {
-			// This is a Pod Create
+		// This is a Pod Create
+		if create == true {
 			c.Log.Info("controller.processNextItem: object create detected: %s", keyRaw)
-			err = c.Handle.ObjectCreated(keyRaw, formattedKey[1], formattedKey[2])
-			//err = c.Handle.ObjectCreated(p)
+			err = c.Handle.ObjectCreated(formattedKey[1], formattedKey[2])
 		} else {
 			// This is a Pod Status Update
 			c.Log.Info("controller.processNextItem: object update detected: %s", keyRaw)
-			err = c.Handle.ObjectUpdated(nil, item)
+			err = c.Handle.ObjectUpdated(item)
 		}
 		if err == nil {
 			c.Queue.Forget(key)
