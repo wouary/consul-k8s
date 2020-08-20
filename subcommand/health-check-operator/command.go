@@ -26,8 +26,9 @@ const (
 	numRetries = 10
 )
 
-// Command is the command for syncing the K8S and Consul service
-// catalogs (one or both directions).
+// Command is the command for running the Health Checks Kubernetes Operator
+// which syncs health probe status of Pods to Consul for service mesh traffic flow
+// optimizations.
 type Command struct {
 	UI cli.Ui
 
@@ -170,6 +171,7 @@ func (c *Command) Run(args []string) int {
 		HFlags:             c.http,
 		ConsulClientScheme: runtime.NewScheme().Name(),
 		Client:             c.consulClient,
+		Clientset:          c.clientset,
 	}
 
 	// Build the controller and start it

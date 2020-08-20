@@ -3,8 +3,11 @@ package healthcheckoperator
 // https://github.com/trstringer/k8s-controller-core-resource
 
 import (
+	ctx "context"
 	"flag"
 	"fmt"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes"
 	"time"
 
 	"github.com/cenkalti/backoff"
@@ -17,7 +20,7 @@ import (
 // Handler interface contains the methods that are required
 type Handler interface {
 	Init() error
-	ObjectCreated(obj interface{}) error
+	ObjectCreated(obj interface{}, namespace, podname string) error
 	ObjectDeleted(obj interface{}) error
 	ObjectUpdated(objOld, objNew interface{}) error
 }
@@ -29,6 +32,7 @@ type HealthCheckHandler struct {
 	Client             *api.Client
 	Flags              *flag.FlagSet
 	HFlags             *flags.HTTPFlags
+	Clientset          kubernetes.Interface
 	ConsulClientScheme string
 }
 
@@ -83,7 +87,7 @@ func (t *HealthCheckHandler) registerConsulHealthCheck(consulHealthCheckID, serv
 		Notes:     "Kubernetes Health Check Failure : " + reason,
 		ServiceID: serviceID,
 		AgentServiceCheck: api.AgentServiceCheck{
-			TTL:                            "100h",
+			TTL:                            "10000h",
 			Status:                         "critical",
 			Notes:                          "",
 			TLSSkipVerify:                  true,
@@ -142,10 +146,121 @@ func (t *HealthCheckHandler) Init() error {
 	return nil
 }
 
+// registerPassingConsulHealthCheck registers a Failing TTL health check for the service on this Agent.
+// The Agent is local to the Pod which has failed a health check.
+// This has the effect of marking the endpoint unhealthy for Consul service mesh traffic.
+func (t *HealthCheckHandler) registerPassingConsulHealthCheck(consulHealthCheckID, serviceID, reason string) error {
+	t.Log.Info("registerPassingHealthCheck, %v %v", consulHealthCheckID, serviceID)
+	// There is a chance of a race between when the Pod is transitioned to healthy by k8s and when we've initially
+	// completed the registration of the service with the Consul Agent on this node. Retry a few times to be sure
+	// that the service does in fact exist, otherwise it will return 500 from Consul API.
+	retries := 0
+	var err error
+	err = backoff.Retry(func() error {
+		if retries > 10 {
+			err = fmt.Errorf("did not find serviceID: %v", serviceID)
+			return nil
+		}
+		retries++
+		svc, err := t.Client.Agent().Services()
+		if err == nil {
+			for _, y := range svc {
+				if y.Service == serviceID {
+					return nil
+				}
+			}
+			return fmt.Errorf("did not find serviceID: %v", serviceID)
+		}
+		return err
+	}, backoff.NewConstantBackOff(1*time.Second))
+	if err != nil {
+		// We were unable to find the service on this host, this is due to :
+		// 1. the pod is no longer on this pod, has moved or was deregistered from the Agent by Consul
+		// 2. Consul isn't working properly
+		// 3. Talking to the wrong Agent (unlikely), or this Agent has restarted and forgotten its registrations
+		return err
+	}
+	// Now create a failing TTL health check in Consul associated with this service.
+	err = t.Client.Agent().CheckRegister(&api.AgentCheckRegistration{
+		Name:      consulHealthCheckID,
+		Notes:     "Kubernetes Health Check " + reason,
+		ServiceID: serviceID,
+		AgentServiceCheck: api.AgentServiceCheck{
+			TTL:                            "10000h",
+			Status:                         "passing",
+			Notes:                          "",
+			TLSSkipVerify:                  true,
+			SuccessBeforePassing:           1,
+			FailuresBeforeCritical:         1,
+			DeregisterCriticalServiceAfter: "",
+		},
+		Namespace: "",
+	})
+	if err != nil {
+		t.Log.Error("unable to register health check with Consul from k8s: %v", err)
+		return err
+	}
+	return nil
+}
+
+func (t *HealthCheckHandler) setConsulHealthCheckStatus(healthCheckID, serviceID, reason string, fail bool) error {
+	if fail == true {
+		return t.Client.Agent().FailTTL(healthCheckID, reason)
+	} else {
+		return t.Client.Agent().PassTTL(healthCheckID, reason)
+	}
+}
+
+// ObjectCreated is called when a Pod is created.
+// We will now register a TTL health check with the Consul Agent
+// podname is
+func (t *HealthCheckHandler) ObjectCreated(obj interface{}, namespace, podname string) error {
+	var err error
+	var p *corev1.Pod
+	retries := 0
+	err = backoff.Retry(func() error {
+		if retries > 30 {
+			err = fmt.Errorf("did not find hostIP for %v", namespace, podname)
+			return nil
+		}
+		retries++
+		// TODO : namespace
+		p, err = t.Clientset.CoreV1().Pods(namespace).Get(ctx.TODO(), podname, metav1.GetOptions{})
+		if err == nil {
+			if p.Status.HostIP != "" {
+				return nil
+			}
+			err = fmt.Errorf("did not find hostIP for %v", namespace, podname)
+		}
+		return err
+	}, backoff.NewConstantBackOff(1*time.Second))
+	if err != nil {
+		return err
+	}
+	pod := p
+	consulHealthCheckID := t.getConsulHealthCheckID(pod)
+
+	t.Log.Info("HealthCheckHandler.ObjectCreated %v", pod.Status.HostIP, consulHealthCheckID)
+	err = t.updateConsulClient(pod)
+	if err != nil {
+		t.Log.Error("unable to update Consul client: %v", err)
+		return err
+	}
+
+	err = t.registerPassingConsulHealthCheck(consulHealthCheckID, t.getConsulServiceID(pod), "") // y.Reason)
+	if err != nil {
+		t.Log.Error("unable to register health check: %v", err)
+		return err
+	}
+	return err
+}
+
+/*
 // ObjectCreated is called when an object is created and is a no-op
 func (t *HealthCheckHandler) ObjectCreated(obj interface{}) error {
 	return nil
 }
+*/
 
 // ObjectDeleted is called when an object is deleted, in theory there may exist a race
 // condition where the Pod is deleted by kubernetes and prior to this event being received
@@ -170,6 +285,50 @@ func (t *HealthCheckHandler) ObjectDeleted(obj interface{}) error {
 	return nil
 }
 
+func (t *HealthCheckHandler) ObjectUpdated(objOld, objNew interface{}) error {
+	pod := objNew.(*corev1.Pod)
+	t.Log.Debug("HealthCheckHandler.ObjectUpdated, %v %v", pod.Status.HostIP, pod.Status.Conditions)
+
+	err := t.updateConsulClient(pod)
+	if err != nil {
+		t.Log.Error("unable to update Consul client: %v", err)
+		return err
+	}
+	consulHealthCheckID := t.getConsulHealthCheckID(pod)
+
+	for _, y := range pod.Status.Conditions {
+		// The health check has failed!
+		if y.Type == "Ready" && y.Status != corev1.ConditionTrue {
+			// Set the status of the health check to failed!
+			err = t.setConsulHealthCheckStatus(consulHealthCheckID, t.getConsulHealthCheckID(pod), y.Reason, true)
+			if err != nil {
+				t.Log.Error("unable to update health check to fail: %v", err)
+				return err
+			}
+			break
+		} else {
+			if y.Type == "Ready" && y.Status == corev1.ConditionTrue {
+				// de-register the failing TTL
+				// This will remove the failing TTL health check against the Consul endpoint,
+				// assuming that the service's other health checks are passing,
+				// it will result in Consul adding the endpoint to the service's dns list
+				// TODO: how to handle out of sync/startup case when the health check didnt already exist ?
+				err = t.setConsulHealthCheckStatus(consulHealthCheckID, t.getConsulHealthCheckID(pod), y.Reason, false)
+				if err != nil {
+					t.Log.Error("unable to update health check to pass: %v", err)
+					return err
+				}
+				break
+			}
+		}
+	}
+	// TODO: how to drop the client connection cleanly?
+	t.Client = nil
+	t.Log.Debug("HealthCheckHandler.ObjectUpdated, %v %v", pod.Status.HostIP, pod.Status.Conditions)
+	return nil
+}
+
+/*
 // ObjectUpdated is called when an object is updated
 // This occurs anytime there is a specific transition from Pod healthy/unhealthy
 // to unhealthy/healthy and is driven off a queue managed by the controller.
@@ -179,7 +338,6 @@ func (t *HealthCheckHandler) ObjectDeleted(obj interface{}) error {
 func (t *HealthCheckHandler) ObjectUpdated(objOld, objNew interface{}) error {
 	pod := objNew.(*corev1.Pod)
 	t.Log.Debug("HealthCheckHandler.ObjectUpdated, %v %v", pod.Status.HostIP, pod.Status.Conditions)
-	var err error
 
 	// Health checks for Consul are agent-local and as such we need a client connection
 	// to the client agent responsible for this connect-injected Pod.
@@ -188,7 +346,7 @@ func (t *HealthCheckHandler) ObjectUpdated(objOld, objNew interface{}) error {
 	// not host-local so we create a new client and connection to the agent on the hostIP
 	// where the Pod is located.
 	// TODO: alternative methods, this will need to change for agentless
-	err = t.updateConsulClient(pod)
+	err := t.updateConsulClient(pod)
 	if err != nil {
 		t.Log.Error("unable to update Consul client: %v", err)
 		return err
@@ -237,3 +395,5 @@ func (t *HealthCheckHandler) ObjectUpdated(objOld, objNew interface{}) error {
 	t.Log.Debug("HealthCheckHandler.ObjectUpdated, %v %v", pod.Status.HostIP, pod.Status.Conditions)
 	return nil
 }
+
+*/

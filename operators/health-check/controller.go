@@ -4,6 +4,7 @@ import (
 	ctx "context"
 	"fmt"
 	"reflect"
+	"strings"
 	"time"
 
 	log "github.com/hashicorp/go-hclog"
@@ -69,20 +70,17 @@ func (c *Controller) addEventHandlers() {
 	c.Informer.AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc: func(obj interface{}) {
 			// convert the resource object into a key (in this case
-			// we are just doing it in the format of 'namespace/name')
-			/*			key, err := cache.MetaNamespaceKeyFunc(obj)
-						c.Log.Info("Add pod: %s", key)
-						if err == nil {
-							// TODO: do not queue a queue for Create because it is a no-op anyway
-							c.Queue.Add(key)
-						}
-			*/
+			// we are just doing it in the format of 'ADD/namespace/name')
+			key, err := cache.MetaNamespaceKeyFunc(obj)
+			c.Log.Info("Add pod: %s", key)
+			if err == nil {
+				c.Queue.Add("ADD/" + key)
+			}
 		},
 		UpdateFunc: func(oldObj, newObj interface{}) {
 			newPod := newObj.(*corev1.Pod)
 			oldPod := oldObj.(*corev1.Pod)
 
-			// TODO
 			if reflect.DeepEqual(oldObj, newObj) == false {
 				c.Log.Debug("pod was updated : " + newPod.Name)
 			} else {
@@ -109,15 +107,10 @@ func (c *Controller) addEventHandlers() {
 				// But only in the case of transition from unhealthy to healthy
 				// TODO: investigate whether or not the Pod starts up unhealthy and migrates healthy
 				// and be sure that the initial healthy doesnt try to delete a health check that doesnt exist
-				/*
-					if newPodStatus == corev1.ConditionTrue && oldPodStatus != corev1.ConditionTrue	{
-						// unhealthy and then
-					}
-				*/
 				key, err := cache.MetaNamespaceKeyFunc(newObj)
 				c.Log.Debug("Update pod: %s", key)
 				if err == nil {
-					c.Queue.Add(key)
+					c.Queue.Add("UPDATE/" + key)
 				}
 			}
 		},
@@ -130,7 +123,7 @@ func (c *Controller) addEventHandlers() {
 			key, err := cache.DeletionHandlingMetaNamespaceKeyFunc(obj)
 			c.Log.Debug("Delete pod: %s", key)
 			if err == nil {
-				c.Queue.Add(key)
+				c.Queue.Add("DELETE/" + key)
 			}
 		},
 	})
@@ -205,7 +198,13 @@ func (c *Controller) processNextItem() bool {
 	}
 
 	// assert the string out of the key (format `namespace/name`)
-	keyRaw := key.(string)
+	// Format is as follows :  add/namespace/name, delete/namespace/name
+	add := true
+	formattedKey := strings.Split(key.(string), "/")
+	if formattedKey[0] != "ADD" {
+		add = false
+	}
+	keyRaw := strings.Join(formattedKey[1:], "/")
 
 	// take the string key and get the object out of the indexer
 	//
@@ -215,7 +214,7 @@ func (c *Controller) processNextItem() bool {
 	//
 	// if there is an error in getting the key from the index
 	// then we want to retry this particular Queue key a certain
-	// number of times (5 here) before we forget the Queue key
+	// number of times (10 here) before we forget the Queue key
 	// and throw an error
 	item, exists, err := c.Informer.GetIndexer().GetByKey(keyRaw)
 	if err != nil {
@@ -236,6 +235,7 @@ func (c *Controller) processNextItem() bool {
 	// after both instances, we want to forget the key from the Queue, as this indicates
 	// a code path of successful Queue key processing
 	if !exists {
+		// TODO: item is nil in case that !exists?
 		c.Log.Info("controller.processNextItem: object deleted detected: %s", keyRaw)
 		err = c.Handle.ObjectDeleted(item)
 		if err == nil {
@@ -245,9 +245,16 @@ func (c *Controller) processNextItem() bool {
 			c.Queue.AddRateLimited(key)
 		}
 	} else {
-		// This is a Pod Status Update
-		c.Log.Info("controller.processNextItem: object update detected: %s", keyRaw)
-		err = c.Handle.ObjectUpdated(nil, item)
+		if add == true {
+			// This is a Pod Create
+			c.Log.Info("controller.processNextItem: object create detected: %s", keyRaw)
+			err = c.Handle.ObjectCreated(keyRaw, formattedKey[1], formattedKey[2])
+			//err = c.Handle.ObjectCreated(p)
+		} else {
+			// This is a Pod Status Update
+			c.Log.Info("controller.processNextItem: object update detected: %s", keyRaw)
+			err = c.Handle.ObjectUpdated(nil, item)
+		}
 		if err == nil {
 			c.Queue.Forget(key)
 		} else if c.Queue.NumRequeues(key) < c.MaxRetries {
