@@ -85,16 +85,16 @@ func (c *Controller) addEventHandlers() {
 			oldPod := oldObj.(*corev1.Pod)
 
 			if reflect.DeepEqual(oldObj, newObj) == false {
-				c.Log.Debug("pod was updated : " + newPod.Name)
+				c.Log.Info("pod was updated : " + newPod.Name)
 			} else {
-				c.Log.Debug("pod was not updated " + newPod.Name)
+				c.Log.Info("pod was not updated " + newPod.Name)
 				return
 			}
-			// Logic is as follows:
 			// We will only queue events which satisfy the condition of a pod Status Condition
-			// change from Ready/NotReady
+			// transition from Ready/NotReady or NotReady/Ready
 			oldPodStatus := corev1.ConditionTrue
 			newPodStatus := corev1.ConditionTrue
+			// In this context "Ready" is the name of the Condition field and not the actual Status
 			for _, y := range oldPod.Status.Conditions {
 				if y.Type == "Ready" {
 					oldPodStatus = y.Status
@@ -105,7 +105,7 @@ func (c *Controller) addEventHandlers() {
 					newPodStatus = y.Status
 				}
 			}
-			// If the Pod Status has changed, we queue the NewObj and we will know based on the condition status
+			// If the Pod Status has changed, we queue the newObj and we will know based on the condition status
 			// whether or not this is an update TO or FROM healthy in the event handler
 			if oldPodStatus != newPodStatus {
 				// TODO: investigate whether or not the Pod starts up unhealthy and migrates healthy
@@ -134,20 +134,18 @@ func (c *Controller) addEventHandlers() {
 
 // Run is the main path of execution for the controller loop
 func (c *Controller) Run(stopCh <-chan struct{}) {
-	// We choose to setup the informer in the Run() section of controller loop so we're not creating it early
+	c.Log.Debug("Controller.Run: initializing")
+	// Setup the Informer
 	c.setupInformer()
 	// Next setup the work queue
 	c.setupWorkQueue()
-	// Next add eventHandlers
+	// Next add eventHandlers, these are responsible for defining Create/Update/Delete functionality
 	c.addEventHandlers()
 
 	// handle a panic with logging and exiting
 	defer utilruntime.HandleCrash()
-	// ignore new items in the Queue but when all goroutines
-	// have completed existing items then shutdown
+	// block new items in the Queue in case of shutdown, drain the queue and exit
 	defer c.Queue.ShutDown()
-
-	c.Log.Debug("Controller.Run: initiating")
 
 	// run the Informer to start listing and watching resources
 	go c.Informer.Run(stopCh)
@@ -158,7 +156,6 @@ func (c *Controller) Run(stopCh <-chan struct{}) {
 		return
 	}
 	c.Log.Debug("Controller.Run: cache sync complete")
-
 	// run the runWorker method every second with a stop channel
 	wait.Until(c.runWorker, time.Second, stopCh)
 }
@@ -172,13 +169,11 @@ func (c *Controller) HasSynced() bool {
 // runWorker executes the loop to process new items added to the Queue
 func (c *Controller) runWorker() {
 	c.Log.Debug("Controller.runWorker: starting")
-
 	// invoke processNextItem to fetch and consume the next change
 	// to a watched or listed resource
 	for c.processNextItem() {
 		c.Log.Debug("Controller.runWorker: processing next item")
 	}
-
 	c.Log.Debug("Controller.runWorker: completed")
 }
 
@@ -195,10 +190,8 @@ func (c *Controller) processNextItem() bool {
 	if quit {
 		return false
 	}
-
-	// assert the string out of the key (format `namespace/name`)
-	// Format is as follows :  create/namespace/name, delete/namespace/name, update/namespace/name
-	// Also keep track if this is an Add
+	// Key format is as follows :  CREATE/namespace/name, DELETE/namespace/name, UPDATE/namespace/name
+	// also keep track if this is an Add
 	create := true
 	formattedKey := strings.Split(key.(string), "/")
 	if formattedKey[0] != "ADD" {
@@ -230,10 +223,8 @@ func (c *Controller) processNextItem() bool {
 
 	// if the item doesn't exist then it was deleted and we need to fire off the Handle's
 	// ObjectDeleted method. but if the object does exist that indicates that the object
-	// was created (or updated) so run the ObjectUpdated method
-	//
-	// after both instances, we want to forget the key from the Queue, as this indicates
-	// a code path of successful Queue key processing
+	// was created or updated so run the ObjectCreated/ObjectUpdated method
+	// dequeue the key to indicate success, requeue it on failure
 	if !exists {
 		// TODO: item is nil in case that !exists?
 		c.Log.Info("controller.processNextItem: object deleted detected: %s", keyRaw)
@@ -255,6 +246,7 @@ func (c *Controller) processNextItem() bool {
 			err = c.Handle.ObjectUpdated(item)
 		}
 		if err == nil {
+			// Indicates success
 			c.Queue.Forget(key)
 		} else if c.Queue.NumRequeues(key) < c.MaxRetries {
 			c.Log.Error("unable to process request, retrying")
@@ -262,6 +254,7 @@ func (c *Controller) processNextItem() bool {
 		}
 	}
 	if err == nil {
+		// marking Done removes the key from the queue entirely
 		c.Queue.Done(key)
 	}
 	// keep the worker loop running by returning true
