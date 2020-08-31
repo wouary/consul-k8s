@@ -20,6 +20,7 @@ import (
 	"github.com/hashicorp/go-discover"
 	"github.com/hashicorp/go-hclog"
 	"github.com/mitchellh/cli"
+	apiv1 "k8s.io/api/core/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
@@ -630,6 +631,124 @@ func (c *Command) Run(args []string) int {
 		// Policy must be global because it replicates from the primary DC
 		// and so the primary DC needs to be able to accept the token.
 		err = c.createGlobalACL(common.ACLReplicationTokenName, rules, consulDC, consulClient)
+		if err != nil {
+			c.log.Error(err.Error())
+			return 1
+		}
+	}
+
+	// todo flag
+	if true {
+		authMethodName := c.withPrefix("system")
+		// Get the Secret name for the auth method ServiceAccount.
+		var authMethodServiceAccount *apiv1.ServiceAccount
+		saName := c.withPrefix("connect-injector-authmethod-svc-account")
+		err := c.untilSucceeds(fmt.Sprintf("getting %s ServiceAccount", saName),
+			func() error {
+				var err error
+				authMethodServiceAccount, err = c.clientset.CoreV1().ServiceAccounts(c.flagK8sNamespace).Get(context.TODO(), saName, metav1.GetOptions{})
+				return err
+			})
+		if err != nil {
+			c.log.Error(err.Error())
+			return 1
+		}
+
+		// ServiceAccounts always have a secret name. The secret
+		// contains the JWT token.
+		saSecretName := authMethodServiceAccount.Secrets[0].Name
+
+		// Get the secret that will contain the ServiceAccount JWT token.
+		var saSecret *apiv1.Secret
+		err = c.untilSucceeds(fmt.Sprintf("getting %s Secret", saSecretName),
+			func() error {
+				var err error
+				saSecret, err = c.clientset.CoreV1().Secrets(c.flagK8sNamespace).Get(context.TODO(), saSecretName, metav1.GetOptions{})
+				return err
+			})
+		if err != nil {
+			c.log.Error(err.Error())
+			return 1
+		}
+
+		kubernetesHost := defaultKubernetesHost
+
+		// Check if custom auth method Host and CACert are provided
+		if c.flagInjectAuthMethodHost != "" {
+			kubernetesHost = c.flagInjectAuthMethodHost
+		}
+
+		// Now we're ready to set up Consul's auth method.
+		authMethodTmpl := api.ACLAuthMethod{
+			Name:        authMethodName,
+			Description: "Auth method used by consul-k8s system components",
+			Type:        "kubernetes",
+			Config: map[string]interface{}{
+				"Host":              kubernetesHost,
+				"CACert":            string(saSecret.Data["ca.crt"]),
+				"ServiceAccountJWT": string(saSecret.Data["token"]),
+			},
+		}
+
+		err = c.untilSucceeds(fmt.Sprintf("creating auth method %s", authMethodTmpl.Name),
+			func() error {
+				_, _, err := consulClient.ACL().AuthMethodCreate(&authMethodTmpl, nil)
+				return err
+			})
+		if err != nil {
+			c.log.Error(err.Error())
+			return 1
+		}
+		selector := fmt.Sprintf("serviceaccount.namespace==\"%s\" and serviceaccount.name==\"%s\"", c.flagK8sNamespace, c.withPrefix("controller"))
+		c.UI.Info("selector: " + selector)
+
+		// Create the binding rule.
+		roleName := "consul-k8s-controller"
+		abr := api.ACLBindingRule{
+			Description: "Kubernetes binding rule",
+			AuthMethod:  authMethodName,
+			BindType:    api.BindingRuleBindTypeRole,
+			BindName:    roleName,
+			Selector:    selector,
+		}
+
+		// Otherwise create the binding rule
+		err = c.untilSucceeds(fmt.Sprintf("creating acl binding rule for %s", authMethodName),
+			func() error {
+				_, _, err := consulClient.ACL().BindingRuleCreate(&abr, nil)
+				return err
+			})
+		if err != nil {
+			c.log.Error(err.Error())
+			return 1
+		}
+
+		err = c.createOrUpdateACLPolicy(api.ACLPolicy{
+			Name:        roleName,
+			Description: "consul-k8s controller policy",
+			Rules: `
+operator = "write"
+service_prefix "" {
+  policy = "write"
+}
+node_prefix "" {
+  policy = "write"
+}`,
+		}, consulClient)
+		if err != nil {
+			c.log.Error(err.Error())
+			return 1
+		}
+
+		_, _, err = consulClient.ACL().RoleCreate(&api.ACLRole{
+			Name:        roleName,
+			Description: "consul-k8s controller role",
+			Policies: []*api.ACLTokenPolicyLink{
+				{
+					Name: roleName,
+				},
+			},
+		}, nil)
 		if err != nil {
 			c.log.Error(err.Error())
 			return 1
