@@ -72,13 +72,8 @@ func (c *Controller) addEventHandlers() {
 	//  - deleting resources
 	c.Informer.AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc: func(obj interface{}) {
-			// convert the resource object into a key (in this case
-			// we are just doing it in the format of 'ADD/namespace/name')
-			key, err := cache.MetaNamespaceKeyFunc(obj)
-			c.Log.Info("Add pod: %s", key)
-			if err == nil {
-				c.Queue.Add("ADD/" + key)
-			}
+			// AddFunc is a no-op as we handle ObjectCreate path on the UpdateFunc
+			return
 		},
 		UpdateFunc: func(oldObj, newObj interface{}) {
 			newPod := newObj.(*corev1.Pod)
@@ -90,44 +85,55 @@ func (c *Controller) addEventHandlers() {
 				c.Log.Info("pod was not updated " + newPod.Name)
 				return
 			}
-			// We will only queue events which satisfy the condition of a pod Status Condition
-			// transition from Ready/NotReady or NotReady/Ready
-			oldPodStatus := corev1.ConditionTrue
-			newPodStatus := corev1.ConditionTrue
-			// In this context "Ready" is the name of the Condition field and not the actual Status
-			for _, y := range oldPod.Status.Conditions {
-				if y.Type == "Ready" {
-					oldPodStatus = y.Status
-				}
-			}
-			for _, y := range newPod.Status.Conditions {
-				if y.Type == "Ready" {
-					newPodStatus = y.Status
-				}
-			}
-			// If the Pod Status has changed, we queue the newObj and we will know based on the condition status
-			// whether or not this is an update TO or FROM healthy in the event handler
-			if oldPodStatus != newPodStatus {
-				// TODO: investigate whether or not the Pod starts up unhealthy and migrates healthy
-				// TODO: and be sure that the initial healthy doesnt try to delete a health check that doesnt exist
+
+			// First we check if this is a transition from Pending to Running, at this point
+			// we have a Pod scheduled and running on a host so we have a hostIP that we can
+			// reference.
+			if oldPod.Status.Phase == corev1.PodPending && newPod.Status.Phase == corev1.PodRunning {
+				// This is the ObjectCreate path
 				key, err := cache.MetaNamespaceKeyFunc(newObj)
-				c.Log.Debug("Update pod: %s", key)
+				c.Log.Info("Add Pod: %s", key)
 				if err == nil {
-					c.Queue.Add("UPDATE/" + key)
+					c.Queue.Add("ADD/" + key)
 				}
+				// We return here because due to startup timing on probes there is a case where we receive
+				// the failed readiness probe before processing the transition from Pending to Running, in which case
+				// the Pending->Running transition will be queued, followed by an Update in the processNextItem() function
+				// which has the effect of setting the health status to the current state
+				return
+			}
+			// We will only process events for PodRunning Pods
+			if newPod.Status.Phase == corev1.PodRunning {
+				// Only queue events which satisfy the condition of a pod Status Condition transition
+				// from Ready/NotReady or NotReady/Ready
+				oldPodStatus := corev1.ConditionTrue
+				newPodStatus := corev1.ConditionTrue
+				// In this context "Ready" is the name of the Condition field and not the actual Status
+				for _, y := range oldPod.Status.Conditions {
+					if y.Type == "Ready" {
+						oldPodStatus = y.Status
+					}
+				}
+				for _, y := range newPod.Status.Conditions {
+					if y.Type == "Ready" {
+						newPodStatus = y.Status
+					}
+				}
+				// If the Pod Status has changed, we queue the newObj and we will know based on the condition status
+				// whether or not this is an update TO or FROM healthy in the event handler
+				if oldPodStatus != newPodStatus {
+					key, err := cache.MetaNamespaceKeyFunc(newObj)
+					c.Log.Info("Update pod: %s", key)
+					if err == nil {
+						c.Queue.Add("UPDATE/" + key)
+					}
+				}
+
 			}
 		},
 		DeleteFunc: func(obj interface{}) {
-			// DeletionHandlingMetaNamespaceKeyFunc is a helper function that allows
-			// us to check the DeletedFinalStateUnknown existence in the event that
-			// a resource was deleted but it is still contained in the index
-			//
-			// this then in turn calls MetaNamespaceKeyFunc
-			key, err := cache.DeletionHandlingMetaNamespaceKeyFunc(obj)
-			c.Log.Debug("Delete pod: %s", key)
-			if err == nil {
-				c.Queue.Add("DELETE/" + key)
-			}
+			// Deletion is handled by the connect-inject webhook!
+			return
 		},
 	})
 }
@@ -155,7 +161,6 @@ func (c *Controller) Run(stopCh <-chan struct{}) {
 		utilruntime.HandleError(fmt.Errorf("error syncing cache"))
 		return
 	}
-	c.Log.Debug("Controller.Run: cache sync complete")
 	// run the runWorker method every second with a stop channel
 	wait.Until(c.runWorker, time.Second, stopCh)
 }
@@ -207,7 +212,7 @@ func (c *Controller) processNextItem() bool {
 	//
 	// if there is an error in getting the key from the index
 	// then we want to retry this particular Queue key a certain
-	// number of times (10 here) before we forget the Queue key
+	// number of times (c.MaxRetries) before we forget the Queue key
 	// and throw an error
 	item, exists, err := c.Informer.GetIndexer().GetByKey(keyRaw)
 	if err != nil {
@@ -221,25 +226,18 @@ func (c *Controller) processNextItem() bool {
 		}
 	}
 
-	// if the item doesn't exist then it was deleted and we need to fire off the Handle's
-	// ObjectDeleted method. but if the object does exist that indicates that the object
+	// if the object does exist that indicates that the object
 	// was created or updated so run the ObjectCreated/ObjectUpdated method
 	// dequeue the key to indicate success, requeue it on failure
-	if !exists {
-		// TODO: item is nil in case that !exists?
-		c.Log.Info("controller.processNextItem: object deleted detected: %s", keyRaw)
-		err = c.Handle.ObjectDeleted(item)
-		if err == nil {
-			c.Queue.Forget(key)
-		} else if c.Queue.NumRequeues(key) < c.MaxRetries {
-			c.Log.Error("unable to process request, retrying")
-			c.Queue.AddRateLimited(key)
-		}
-	} else {
+	if exists {
 		// This is a Pod Create
 		if create == true {
 			c.Log.Info("controller.processNextItem: object create detected: %s", keyRaw)
-			err = c.Handle.ObjectCreated(formattedKey[1], formattedKey[2])
+			err = c.Handle.ObjectCreated(item)
+			if err == nil {
+				c.Log.Info("controller.processNextItem: object update as part of ObjectCreate: %s", keyRaw)
+				err = c.Handle.ObjectUpdated(item)
+			}
 		} else {
 			// This is a Pod Status Update
 			c.Log.Info("controller.processNextItem: object update detected: %s", keyRaw)
