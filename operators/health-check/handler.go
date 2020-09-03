@@ -32,6 +32,7 @@ type HealthCheckHandler struct {
 	HFlags             *flags.HTTPFlags
 	Clientset          kubernetes.Interface
 	ConsulClientScheme string
+	ConsulPort         string
 }
 
 // TODO: What about namespaces?
@@ -64,19 +65,26 @@ func (t *HealthCheckHandler) deregisterConsulHealthCheck(consulHealthCheckID str
 // for health check registration/deregistration.
 func (t *HealthCheckHandler) updateConsulClient(pod *corev1.Pod) error {
 	var err error
-	hostIP := pod.Status.HostIP
-	port := "8500"
-	if pod.Annotations["consul.hashicorp.com/connect-service-port"] == "https" {
-		port = "8501"
+	// We use the whole schema including http/https here because that is normally set in the
+	// CONSUL_HTTP_ADDR environment variable, without https the client will default to http even if the port
+	// is 8501
+	httpfmt := "http"
+	if t.ConsulPort == "8501" {
+		httpfmt = "https"
 	}
-	newAddr := fmt.Sprintf("%v:%v", hostIP, port)
+	newAddr := fmt.Sprintf("%v://%v:%v", httpfmt, pod.Status.HostIP, t.ConsulPort)
 	t.HFlags.SetAddress(newAddr)
+
+	// TODO: APIClient() reads the ENV, this isnt necessary because the only thing changing is the Address in a struct
+	// TODO: See if we can avoid this by creating a new API
+
 	// Set client api to point to the new host IP
-	t.Log.Debug("setting consul client to: %v", newAddr)
 	t.Client, err = t.HFlags.APIClient()
 	if err != nil {
 		t.Log.Error("unable to get Consul API Client for address %s: %s", newAddr, err)
+		t.Client = nil
 	}
+	t.Log.Info("setting consul client to the following agent: %v", newAddr)
 	return err
 }
 
@@ -129,6 +137,7 @@ func (t *HealthCheckHandler) registerPassingConsulHealthCheck(consulHealthCheckI
 			FailuresBeforeCritical:         1,
 			DeregisterCriticalServiceAfter: "",
 		},
+		// TODO: support namespaces for consul-ent
 		Namespace: "",
 	})
 	if err != nil {
@@ -207,7 +216,8 @@ func (t *HealthCheckHandler) ObjectDeleted(obj interface{}) error {
 // In the case of transition FROM healthy we mark the TTL as failing
 func (t *HealthCheckHandler) ObjectUpdated(objNew interface{}) error {
 	pod := objNew.(*corev1.Pod)
-	t.Log.Error("HealthCheckHandler.ObjectUpdated, %v %v", pod.Status.HostIP, pod.Status.Conditions)
+
+	t.Log.Debug("HealthCheckHandler.ObjectUpdated, %v %v", pod.Status.HostIP, pod.Status.Conditions)
 	err := t.updateConsulClient(pod)
 	if err != nil {
 		t.Log.Error("unable to update Consul client: %v", err)
@@ -222,7 +232,6 @@ func (t *HealthCheckHandler) ObjectUpdated(objNew interface{}) error {
 			err = t.setConsulHealthCheckStatus(consulHealthCheckID, y.Message, true)
 			if err != nil {
 				t.Log.Error("unable to update health check to fail: %v", err)
-				return err
 			}
 			break
 		} else {
@@ -231,7 +240,6 @@ func (t *HealthCheckHandler) ObjectUpdated(objNew interface{}) error {
 				err = t.setConsulHealthCheckStatus(consulHealthCheckID, y.Message, false)
 				if err != nil {
 					t.Log.Error("unable to update health check to pass: %v", err)
-					return err
 				}
 				break
 			}
@@ -239,6 +247,8 @@ func (t *HealthCheckHandler) ObjectUpdated(objNew interface{}) error {
 	}
 	// TODO: how to drop the client connection cleanly?
 	t.Client = nil
-	t.Log.Debug("HealthCheckHandler.ObjectUpdated, %v %v", pod.Status.HostIP, pod.Status.Conditions)
-	return nil
+	if err == nil {
+		t.Log.Debug("HealthCheckHandler.ObjectUpdated, %v %v", pod.Status.HostIP, pod.Status.Conditions)
+	}
+	return err
 }

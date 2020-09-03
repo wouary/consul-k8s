@@ -42,8 +42,8 @@ type Command struct {
 	// Flags to support namespaces
 	flagEnableNamespaces bool // Use namespacing on all components
 
-	consulClient *api.Client
-	clientset    kubernetes.Interface
+	ControllerClient *api.Client
+	clientset        kubernetes.Interface
 
 	once   sync.Once
 	sigCh  chan os.Signal
@@ -54,7 +54,6 @@ type Command struct {
 func (c *Command) init() {
 	c.flags = flag.NewFlagSet("", flag.ContinueOnError)
 	c.flags.StringVar(&c.flagListen, "listen", ":8080", "Address to bind listener to.")
-	// TODO: do not think this is needed
 	c.flags.StringVar(&c.flagK8SSourceNamespace, "k8s-source-namespace", metav1.NamespaceAll,
 		"The Kubernetes namespace to watch for service changes and sync to Consul. "+
 			"If this is not set then it will default to all namespaces.")
@@ -80,6 +79,7 @@ func (c *Command) init() {
 }
 
 func (c *Command) Run(args []string) int {
+	var err error
 	c.once.Do(c.init)
 	if err := c.flags.Parse(args); err != nil {
 		c.UI.Info(fmt.Sprintf("%v", err))
@@ -122,18 +122,30 @@ func (c *Command) Run(args []string) int {
 
 	// Start Consul-to-K8S sync
 	var healthCh chan struct{}
-	// construct the Controller object which has all of the necessary components to
-	// handle logging, connections, informing (listing and watching), the queue,
-	// and the handler
+	// check the environment for CACERT specified which tells us which port to use to talk to Consul in the handler
+	tlsEnabled := os.Getenv("CONSUL_CACERT")
+	consulPort := "8500"
+	if tlsEnabled != "" {
+		consulPort = "8501"
+	}
+
 	healthCheckHandler := &hcko.HealthCheckHandler{
 		Log:                c.logger.Named("healthcheckHandler"),
 		Flags:              c.flags,
 		HFlags:             c.http,
 		ConsulClientScheme: runtime.NewScheme().Name(),
-		Client:             c.consulClient,
 		Clientset:          c.clientset,
+		ConsulPort:         consulPort,
 	}
-
+	// This is used by the controller's own health check
+	c.ControllerClient, err = c.http.APIClient()
+	if err != nil {
+		c.UI.Error(fmt.Sprintf("Error retrieving client connection for controller: %s", err))
+		return 1
+	}
+	// construct the Controller object which has all of the necessary components to
+	// handle logging, connections, informing (listing and watching), the queue,
+	// and the handler
 	// Build the controller and start it
 	cont := &hcko.Controller{
 		Log:        c.logger.Named("healthcheckController"),
@@ -207,16 +219,13 @@ Usage: consul-k8s health-checks [options]
 `
 
 func (c *Command) handleReady(rw http.ResponseWriter, req *http.Request) {
-	// The main readiness check is whether sync can talk to
+	// The main readiness check is whether the controller can talk to
 	// the consul cluster, in this case querying for the leader
-	// TODO: consulClient wont be valid here bc we instantiate it at runtime..
-	// Do we need a second consulClient?
-	/*_, err := c.consulClient.Status().Leader()
+	_, err := c.ControllerClient.Status().Leader()
 	if err != nil {
 		c.UI.Error(fmt.Sprintf("[GET /health/ready] Error getting leader status: %s", err))
 		rw.WriteHeader(500)
 		return
 	}
-	*/
 	rw.WriteHeader(204)
 }
