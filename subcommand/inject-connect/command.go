@@ -72,6 +72,9 @@ type Command struct {
 	flagInitContainerMemoryLimit   string
 	flagInitContainerMemoryRequest string
 
+	// health checks enabled
+	flagEnableConnectInjectHealthChecks bool
+
 	flagSet *flag.FlagSet
 	http    *flags.HTTPFlags
 
@@ -125,6 +128,8 @@ func (c *Command) init() {
 	c.flagSet.StringVar(&c.flagCrossNamespaceACLPolicy, "consul-cross-namespace-acl-policy", "",
 		"[Enterprise Only] Name of the ACL policy to attach to all created Consul namespaces to allow service "+
 			"discovery across Consul namespaces. Only necessary if ACLs are enabled.")
+	c.flagSet.BoolVar(&c.flagEnableConnectInjectHealthChecks, "enable-connect-inject-health-checks", false,
+		"Enables connect inject health check monitoring in Consul")
 
 	// Proxy sidecar resource setting flags.
 	c.flagSet.StringVar(&c.flagDefaultSidecarProxyCPURequest, "default-sidecar-proxy-cpu-request", "", "Default sidecar proxy CPU request.")
@@ -311,6 +316,7 @@ func (c *Command) Run(args []string) int {
 		EnableK8SNSMirroring:       c.flagEnableK8SNSMirroring,
 		K8SNSMirroringPrefix:       c.flagK8SNSMirroringPrefix,
 		CrossNamespaceACLPolicy:    c.flagCrossNamespaceACLPolicy,
+		EnableHealthChecks:         c.flagEnableConnectInjectHealthChecks,
 		Log:                        hclog.Default().Named("handler"),
 	}
 	mux := http.NewServeMux()

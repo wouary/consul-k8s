@@ -83,6 +83,9 @@ const (
 	annotationSidecarProxyCPURequest    = "consul.hashicorp.com/sidecar-proxy-cpu-request"
 	annotationSidecarProxyMemoryLimit   = "consul.hashicorp.com/sidecar-proxy-memory-limit"
 	annotationSidecarProxyMemoryRequest = "consul.hashicorp.com/sidecar-proxy-memory-request"
+
+	// pod label for health checks
+	podLabelHealthChecks = "consul-connect-inject-health-checks"
 )
 
 var (
@@ -184,6 +187,10 @@ type Handler struct {
 	// Resource settings for lifecycle sidecar. All of these fields
 	// will be populated by the defaults provided in the initial flags.
 	LifecycleSidecarResources corev1.ResourceRequirements
+
+	// Health Checks enabled will control the addition of a Pod label
+	// via the mutating webhook to the connect injected Pod
+	EnableHealthChecks bool
 
 	// Log
 	Log hclog.Logger
@@ -346,6 +353,13 @@ func (h *Handler) Mutate(req *v1beta1.AdmissionRequest) *v1beta1.AdmissionRespon
 	patches = append(patches, updateAnnotation(
 		pod.Annotations,
 		map[string]string{annotationStatus: "injected"})...)
+
+	// Add Pod label for health checks
+	if h.EnableHealthChecks {
+		patches = append(patches, updateLabels(
+			pod.Labels,
+			map[string]string{podLabelHealthChecks: "true"})...)
+	}
 
 	// Generate the patch
 	var patch []byte

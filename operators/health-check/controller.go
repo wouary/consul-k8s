@@ -19,6 +19,13 @@ import (
 	"k8s.io/client-go/util/workqueue"
 )
 
+const (
+	// annotationInject is the key of the annotation that controls whether
+	// injection is explicitly enabled or disabled for a pod. This should
+	// be set to a truthy or falsy value, as parseable by strconv.ParseBool
+	annotationInject = "consul.hashicorp.com/connect-inject"
+)
+
 // Controller struct defines how a controller should encapsulate
 // logging, client connectivity, informing (list and watching)
 // queueing, and handling of resource changes
@@ -35,18 +42,15 @@ type Controller struct {
 
 func (c *Controller) setupInformer() {
 	c.Informer = cache.NewSharedIndexInformer(
-		// the ListWatch contains two different functions that our
-		// informer requires: ListFunc to take care of listing and watching
-		// the resources we want to handle
+		// ListWatch takes a List and Watch function which we filter based on label of consul
+		// and later process based on seeing the pod annotation annotationInject (consul.hashicorp.com/connect-inject)
 		&cache.ListWatch{
 			ListFunc: func(options metav1.ListOptions) (runtime.Object, error) {
-				options.LabelSelector = "consul" //=consul.hashicorp.com/connect-inject"
-				// list all of the pods (core resource) in the k8s namespace
+				options.LabelSelector = "consul-connect-inject-health-checks"
 				return c.Clientset.CoreV1().Pods(c.Namespace).List(ctx.Background(), options)
 			},
 			WatchFunc: func(options metav1.ListOptions) (watch.Interface, error) {
-				options.LabelSelector = "consul" //=consul.hashicorp.com/connect-inject"
-				// watch all of the pods which match Consul labels in k8s namespace
+				options.LabelSelector = "consul-connect-inject-health-checks"
 				return c.Clientset.CoreV1().Pods(c.Namespace).Watch(ctx.Background(), options)
 			},
 		},
@@ -57,19 +61,19 @@ func (c *Controller) setupInformer() {
 }
 
 func (c *Controller) setupWorkQueue() {
-	// create a new queue so that when the informer gets a resource that is either
-	// a result of listing or watching, we can add an idenfitying key to the queue
-	// so that it can be handled in the handler
+	// create a queue so that when the informer gets a resource that we are watching or listing
+	// we can add it with an identifier key so processNextItem() can later process it.
 	// The queue will be indexed via keys in the format of :  OPTION/namespace/resource
-	// where OPTION will be one of ADD/UPDATE/CREATE
+	// where OPTION will be one of UPDATE/CREATE/DELETE
 	c.Queue = workqueue.NewRateLimitingQueue(workqueue.DefaultControllerRateLimiter())
 }
 
 func (c *Controller) addEventHandlers() {
-	// add event handlers to handle the three types of events for resources:
-	//  - adding new resources
-	//  - updating existing resources
-	//  - deleting resources
+	// add event handlers to handle the three types of events for resources
+	// We will only implement Update as all transition events that we care about are considered object Updates:
+	// Create: pod.Status.Phase corev1.PodPending->corev1.PodRunning
+	// Update: pod.Status.PodConditions.["Ready"] True->False || False->True
+	// Delete: handled by connect-inject webhook
 	c.Informer.AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc: func(obj interface{}) {
 			// AddFunc is a no-op as we handle ObjectCreate path on the UpdateFunc
@@ -78,28 +82,29 @@ func (c *Controller) addEventHandlers() {
 		UpdateFunc: func(oldObj, newObj interface{}) {
 			newPod := newObj.(*corev1.Pod)
 			oldPod := oldObj.(*corev1.Pod)
-
+			if newPod.Annotations[annotationInject] != "true" {
+				return
+			}
+			// Check to see if the object really was modified
 			if reflect.DeepEqual(oldObj, newObj) == false {
 				c.Log.Info("pod was updated : " + newPod.Name)
 			} else {
 				c.Log.Info("pod was not updated " + newPod.Name)
 				return
 			}
-
 			// First we check if this is a transition from Pending to Running, at this point
 			// we have a Pod scheduled and running on a host so we have a hostIP that we can
-			// reference.
+			// reference. This is the ObjectCreate path
 			if oldPod.Status.Phase == corev1.PodPending && newPod.Status.Phase == corev1.PodRunning {
-				// This is the ObjectCreate path
 				key, err := cache.MetaNamespaceKeyFunc(newObj)
 				c.Log.Info("Add Pod: %s", key)
 				if err == nil {
 					c.Queue.Add("ADD/" + key)
 				}
-				// We return here because due to startup timing on probes there is a case where we receive
-				// the failed readiness probe before processing the transition from Pending to Running, in which case
-				// the Pending->Running transition will be queued, followed by an Update in the processNextItem() function
-				// which has the effect of setting the health status to the current state
+				// We return here, due to startup timing on probes there is a case where we receive
+				// the failed readiness probe before processing the transition from Pending to Running.
+				// When we process ObjectCreate from processNextItem() we will append an ObjectUpdate()
+				// which has the effect of setting the health status of the newly created TTL to the current state
 				return
 			}
 			// We will only process events for PodRunning Pods
@@ -119,8 +124,7 @@ func (c *Controller) addEventHandlers() {
 						newPodStatus = y.Status
 					}
 				}
-				// If the Pod Status has changed, we queue the newObj and we will know based on the condition status
-				// whether or not this is an update TO or FROM healthy in the event handler
+				// If the Pod Status has changed, we queue the newObj and set the TTL to the newObj status
 				if oldPodStatus != newPodStatus {
 					key, err := cache.MetaNamespaceKeyFunc(newObj)
 					c.Log.Info("Update pod: %s", key)
@@ -128,7 +132,6 @@ func (c *Controller) addEventHandlers() {
 						c.Queue.Add("UPDATE/" + key)
 					}
 				}
-
 			}
 		},
 		DeleteFunc: func(obj interface{}) {
